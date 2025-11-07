@@ -142,10 +142,10 @@ router.post('/video-info', async (req, res) => {
     }
 });
 
-// Simple download endpoint
+// Simple download endpoint - No internal API calls
 router.get('/download', async (req, res) => {
     try {
-        const { url, quality = 'standard', filename } = req.query;
+        const { url, quality = 'standard' } = req.query;
         
         console.log('📥 Download request:', { url, quality });
 
@@ -156,27 +156,50 @@ router.get('/download', async (req, res) => {
             });
         }
 
-        // Get video info first using internal call
-        let videoInfo;
-        try {
-            const infoResponse = await axios.post(`http://localhost:3000/api/tiktok/video-info`, {
-                tiktokUrl: url
-            });
+        // Direct API call to external TikTok APIs
+        const apis = [
+            `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`,
+            `https://api.tiklydown.com/api/download?url=${encodeURIComponent(url)}`
+        ];
 
-            if (!infoResponse.data.success) {
-                throw new Error(infoResponse.data.message);
+        let videoData = null;
+
+        for (const apiUrl of apis) {
+            try {
+                console.log(`🔄 Trying API: ${apiUrl}`);
+                const apiResponse = await axios.get(apiUrl, { 
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                
+                if (apiResponse.data && apiResponse.data.data) {
+                    videoData = apiResponse.data.data;
+                    console.log('✅ API success');
+                    break;
+                }
+            } catch (error) {
+                console.log(`❌ API failed: ${error.message}`);
+                continue;
             }
+        }
 
-            videoInfo = infoResponse.data.data;
-        } catch (error) {
+        if (!videoData) {
             return res.status(400).json({
                 success: false,
-                message: 'Failed to analyze video: ' + error.message
+                message: 'Failed to fetch video data from TikTok APIs'
             });
         }
-        
+
+        // Extract available qualities
+        const qualities = [];
+        if (videoData.play) qualities.push({ quality: 'standard', url: videoData.play });
+        if (videoData.hdplay) qualities.push({ quality: 'hd', url: videoData.hdplay });
+        if (videoData.wmplay) qualities.push({ quality: 'watermark', url: videoData.wmplay });
+
         // Find requested quality
-        const qualityInfo = videoInfo.qualities.find(q => q.quality === quality) || videoInfo.qualities[0];
+        const qualityInfo = qualities.find(q => q.quality === quality) || qualities[0];
         
         if (!qualityInfo) {
             return res.status(400).json({
@@ -192,17 +215,18 @@ router.get('/download', async (req, res) => {
             method: 'GET',
             url: qualityInfo.url,
             responseType: 'stream',
-            timeout: 120000,
+            timeout: 60000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Referer': 'https://www.tiktok.com/',
-                'Accept': 'video/mp4,video/webm,video/*;q=0.9,*/*;q=0.8'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://www.tiktok.com/'
             }
         });
 
-        // Generate filename without "normal" word
-        const finalFilename = filename || `tiktok_${videoInfo.author.uniqueId}_${videoInfo.id}.mp4`;
-        const cleanFilename = finalFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+        // Generate filename
+        const author = videoData.author?.unique_id || 'tiktok';
+        const videoId = videoData.id || Date.now();
+        const filename = `tiktok_${author}_${videoId}.mp4`;
+        const cleanFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
 
         // Set download headers
         res.setHeader('Content-Disposition', `attachment; filename="${cleanFilename}"`);
